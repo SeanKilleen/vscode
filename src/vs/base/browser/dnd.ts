@@ -5,7 +5,7 @@
 
 'use strict';
 
-import {$} from 'vs/base/browser/builder';
+import { $ } from 'vs/base/browser/builder';
 
 /**
  * A helper that will execute a provided function when the provided HTMLElement receives
@@ -21,7 +21,7 @@ export class DelayedDragHandler {
 				this.timeout = setTimeout(() => {
 					callback();
 
-					delete this.timeout;
+					this.timeout = null;
 				}, 800);
 			}
 		});
@@ -32,7 +32,7 @@ export class DelayedDragHandler {
 	private clearDragTimeout(): void {
 		if (this.timeout) {
 			clearTimeout(this.timeout);
-			delete this.timeout;
+			this.timeout = null;
 		}
 	}
 

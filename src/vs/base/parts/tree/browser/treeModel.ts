@@ -5,7 +5,8 @@
 'use strict';
 
 import Assert = require('vs/base/common/assert');
-import { IDisposable, combinedDispose } from 'vs/base/common/lifecycle';
+import { onUnexpectedError } from 'vs/base/common/errors';
+import { IDisposable, combinedDisposable } from 'vs/base/common/lifecycle';
 import arrays = require('vs/base/common/arrays');
 import { INavigator } from 'vs/base/common/iterator';
 import Events = require('vs/base/common/eventEmitter');
@@ -13,8 +14,8 @@ import WinJS = require('vs/base/common/winjs.base');
 import _ = require('./tree');
 
 interface IMap<T> { [id: string]: T; }
-interface IItemMap extends IMap<Item> {}
-interface ITraitMap extends IMap<IItemMap> {}
+interface IItemMap extends IMap<Item> { }
+interface ITraitMap extends IMap<IItemMap> { }
 
 export class LockData extends Events.EventEmitter {
 
@@ -80,18 +81,18 @@ export class Lock {
 		var lock = this.getLock(item);
 
 		if (lock) {
-			var unbindListener: Events.ListenerUnbind;
+			var unbindListener: IDisposable;
 
-			return new WinJS.Promise((c, e) => {
+			return new WinJS.TPromise((c, e) => {
 				unbindListener = lock.addOneTimeListener('unlock', () => {
 					return this.run(item, fn).then(c, e);
 				});
-			}, () => unbindListener());
+			}, () => { unbindListener.dispose(); });
 		}
 
 		var result: WinJS.Promise;
 
-		return new WinJS.Promise((c, e) => {
+		return new WinJS.TPromise((c, e) => {
 
 			if (item.isDisposed()) {
 				return e(new Error('Item is disposed.'));
@@ -127,6 +128,7 @@ export class Lock {
 
 export class ItemRegistry extends Events.EventEmitter {
 
+	private _isDisposed = false;
 	private items: IMap<{ item: Item; disposable: IDisposable; }>;
 
 	constructor() {
@@ -136,7 +138,7 @@ export class ItemRegistry extends Events.EventEmitter {
 
 	public register(item: Item): void {
 		Assert.ok(!this.isRegistered(item.id), 'item already registered: ' + item.id);
-		this.items[item.id] = { item, disposable: this.addEmitter2(item) };
+		this.items[item.id] = { item, disposable: this.addEmitter(item) };
 	}
 
 	public deregister(item: Item): void {
@@ -156,7 +158,12 @@ export class ItemRegistry extends Events.EventEmitter {
 
 	public dispose(): void {
 		super.dispose();
-		delete this.items;
+		this.items = null;
+		this._isDisposed = true;
+	}
+
+	public isDisposed(): boolean {
+		return this._isDisposed;
 	}
 }
 
@@ -199,8 +206,6 @@ export class Item extends Events.EventEmitter {
 	public firstChild: Item;
 	public lastChild: Item;
 
-	private userContent: HTMLElement;
-
 	private height: number;
 	private depth: number;
 
@@ -231,10 +236,9 @@ export class Item extends Events.EventEmitter {
 		this.firstChild = null;
 		this.lastChild = null;
 
-		this.userContent = null;
 		this.traits = {};
 		this.depth = 0;
-		this.expanded = false;
+		this.expanded = this.context.dataSource.shouldAutoexpand && this.context.dataSource.shouldAutoexpand(this.context.tree, element);
 
 		this.emit('item:create', { item: this });
 
@@ -389,7 +393,15 @@ export class Item extends Events.EventEmitter {
 				childrenPromise = WinJS.TPromise.as([]);
 			}
 
-			return childrenPromise.then((elements: any[]) => {
+			const result = childrenPromise.then((elements: any[]) => {
+				if (this.isDisposed() || this.registry.isDisposed()) {
+					return WinJS.TPromise.as(null);
+				}
+
+				if (!Array.isArray(elements)) {
+					return WinJS.TPromise.wrapError(new Error('Please return an array of children.'));
+				}
+
 				elements = !elements ? [] : elements.slice(0);
 				elements = this.sort(elements);
 
@@ -424,9 +436,11 @@ export class Item extends Events.EventEmitter {
 				} else {
 					return WinJS.TPromise.as(null);
 				}
-			}).then(() => {
-				this.emit('item:childrenRefreshed', eventData);
 			});
+
+			return result
+				.then(null, onUnexpectedError)
+				.then(() => this.emit('item:childrenRefreshed', eventData));
 		};
 
 		return safe ? doRefresh() : this.lock.run(this, doRefresh);
@@ -467,6 +481,17 @@ export class Item extends Events.EventEmitter {
 
 		result.reverse();
 		return result;
+	}
+
+	public getChildren(): Item[] {
+		var child = this.firstChild;
+		var results = [];
+		while (child) {
+			results.push(child);
+			child = child.next;
+		}
+
+		return results;
 	}
 
 	private isAncestorOf(item: Item): boolean {
@@ -539,7 +564,7 @@ export class Item extends Events.EventEmitter {
 	}
 
 	private mapEachChild<T>(fn: (child: Item) => T): T[] {
-		var result = [];
+		var result: T[] = [];
 		this.forEachChild((child) => {
 			result.push(fn(child));
 		});
@@ -571,11 +596,11 @@ export class Item extends Events.EventEmitter {
 	public dispose(): void {
 		this.forEachChild((child) => child.dispose());
 
-		delete this.parent;
-		delete this.previous;
-		delete this.next;
-		delete this.firstChild;
-		delete this.lastChild;
+		this.parent = null;
+		this.previous = null;
+		this.next = null;
+		this.firstChild = null;
+		this.lastChild = null;
 
 		var eventData: IItemDisposeEvent = { item: this };
 		this.emit('item:dispose', eventData);
@@ -630,13 +655,21 @@ export class TreeNavigator implements INavigator<Item> {
 	static lastDescendantOf(item: Item): Item {
 		if (!item) {
 			return null;
-		} else {
-			if (!item.isVisible() || !item.isExpanded() || item.lastChild === null) {
-				return item;
-			} else {
-				return TreeNavigator.lastDescendantOf(item.lastChild);
-			}
 		}
+
+		if (item instanceof RootItem) {
+			return TreeNavigator.lastDescendantOf(item.lastChild);
+		}
+
+		if (!item.isVisible()) {
+			return TreeNavigator.lastDescendantOf(item.previous);
+		}
+
+		if (!item.isExpanded() || item.lastChild === null) {
+			return item;
+		}
+
+		return TreeNavigator.lastDescendantOf(item.lastChild);
 	}
 
 	constructor(item: Item, subTreeOnly: boolean = true) {
@@ -705,15 +738,7 @@ export class TreeNavigator implements INavigator<Item> {
 	}
 
 	public last(): Item {
-		if (this.start && this.start.isExpanded()) {
-			this.item = this.start.lastChild;
-
-			if (this.item && !this.item.isVisible()) {
-				this.previous();
-			}
-		}
-
-		return this.item || null;
+		return TreeNavigator.lastDescendantOf(this.start);
 	}
 }
 
@@ -801,13 +826,13 @@ export class TreeModel extends Events.EventEmitter {
 
 		this.registry = new ItemRegistry();
 
-		this.registryDisposable = combinedDispose(
-			this.addEmitter2(this.registry),
-			this.registry.addListener2('item:dispose', (event: IItemDisposeEvent) => {
+		this.registryDisposable = combinedDisposable([
+			this.addEmitter(this.registry),
+			this.registry.addListener('item:dispose', (event: IItemDisposeEvent) => {
 				event.item.getAllTraits()
 					.forEach(trait => delete this.traitsToItems[trait][event.item.id]);
 			})
-		);
+		]);
 
 		var id = this.context.dataSource.getId(this.context.tree, element);
 		this.input = new RootItem(id, this.registry, this.context, this.lock, element);
@@ -832,16 +857,6 @@ export class TreeModel extends Events.EventEmitter {
 		return item.refresh(recursive).then(() => {
 			this.emit('refreshed', eventData);
 		});
-	}
-
-	public refreshAll(elements: any[], recursive: boolean = true): WinJS.Promise {
-		var promises = [];
-		this.deferredEmit(() => {
-			for (var i = 0, len = elements.length; i < len; i++) {
-				promises.push(this.refresh(elements[i], recursive));
-			}
-		});
-		return WinJS.Promise.join(promises);
 	}
 
 	public expand(element: any): WinJS.Promise {
@@ -895,8 +910,29 @@ export class TreeModel extends Events.EventEmitter {
 		return WinJS.Promise.join(promises);
 	}
 
-	public toggleExpansion(element: any): WinJS.Promise {
-		return this.isExpanded(element) ? this.collapse(element) : this.expand(element);
+	public collapseDeepestExpandedLevel(): WinJS.Promise {
+		var levelToCollapse = this.findDeepestExpandedLevel(this.input, 0);
+
+		var items = [this.input];
+		for (var i = 0; i < levelToCollapse; i++) {
+			items = arrays.flatten(items.map(node => node.getChildren()));
+		}
+
+		var promises = items.map(child => this.collapse(child, false));
+		return WinJS.Promise.join(promises);
+	}
+
+	private findDeepestExpandedLevel(item: Item, currentLevel: number): number {
+		var expandedChildren = item.getChildren().filter(child => child.isExpanded());
+		if (!expandedChildren.length) {
+			return currentLevel;
+		}
+
+		return Math.max(...expandedChildren.map(child => this.findDeepestExpandedLevel(child, currentLevel + 1)));
+	}
+
+	public toggleExpansion(element: any, recursive: boolean = false): WinJS.Promise {
+		return this.isExpanded(element) ? this.collapse(element, recursive) : this.expand(element);
 	}
 
 	public toggleExpansionAll(elements: any[]): WinJS.Promise {
@@ -1078,7 +1114,7 @@ export class TreeModel extends Events.EventEmitter {
 			previousItem: Item = null;
 
 		if (selection.length === 0) {
-			var nav = this.getNavigator(this.input);
+			let nav = this.getNavigator(this.input);
 
 			while (item = nav.next()) {
 				previousItem = item;
@@ -1088,7 +1124,7 @@ export class TreeModel extends Events.EventEmitter {
 
 		} else {
 			item = selection[0];
-			var nav = this.getNavigator(item, false);
+			let nav = this.getNavigator(item, false);
 
 			for (var i = 0; i < count; i++) {
 				previousItem = nav.previous();
@@ -1184,12 +1220,24 @@ export class TreeModel extends Events.EventEmitter {
 		}
 	}
 
-	public focusFirst(eventPayload?: any): void {
-		this.focusNth(0, eventPayload);
+	public focusFirstChild(eventPayload?: any): void {
+		const item = this.getItem(this.getFocus() || this.input);
+		const nav = this.getNavigator(item, false);
+		const next = nav.next();
+		const parent = nav.parent();
+
+		if (parent === item) {
+			this.setFocus(next, eventPayload);
+		}
 	}
 
-	public focusNth(index: number, eventPayload?: any): void {
-		var nav = this.getNavigator(this.input);
+	public focusFirst(eventPayload?: any, from?: any): void {
+		this.focusNth(0, eventPayload, from);
+	}
+
+	public focusNth(index: number, eventPayload?: any, from?: any): void {
+		var navItem = this.getParent(from);
+		var nav = this.getNavigator(navItem);
 		var item = nav.first();
 		for (var i = 0; i < index; i++) {
 			item = nav.next();
@@ -1200,20 +1248,37 @@ export class TreeModel extends Events.EventEmitter {
 		}
 	}
 
-	public focusLast(eventPayload?: any): void {
-		var nav = this.getNavigator(this.input);
-		var item = nav.last();
+	public focusLast(eventPayload?: any, from?: any): void {
+		var navItem = this.getParent(from);
+		var item: Item;
+		if (from) {
+			item = navItem.lastChild;
+		} else {
+			var nav = this.getNavigator(navItem);
+			item = nav.last();
+		}
 
 		if (item) {
 			this.setFocus(item, eventPayload);
 		}
 	}
 
+	private getParent(from?: any): Item {
+		if (from) {
+			var fromItem = this.getItem(from);
+			if (fromItem && fromItem.parent) {
+				return fromItem.parent;
+			}
+		}
+
+		return this.getItem(this.input);
+	}
+
 	public getNavigator(element: any = null, subTreeOnly: boolean = true): INavigator<Item> {
 		return new TreeNavigator(this.getItem(element), subTreeOnly);
 	}
 
-	private getItem(element: any = null): Item {
+	public getItem(element: any = null): Item {
 		if (element === null) {
 			return this.input;
 		} else if (element instanceof Item) {
@@ -1226,7 +1291,7 @@ export class TreeModel extends Events.EventEmitter {
 	}
 
 	public addTraits(trait: string, elements: any[]): void {
-		var items: IItemMap = this.traitsToItems[trait] || <IItemMap> {};
+		var items: IItemMap = this.traitsToItems[trait] || <IItemMap>{};
 		var item: Item;
 		for (var i = 0, len = elements.length; i < len; i++) {
 			item = this.getItem(elements[i]);
@@ -1240,7 +1305,7 @@ export class TreeModel extends Events.EventEmitter {
 	}
 
 	public removeTraits(trait: string, elements: any[]): void {
-		var items: IItemMap = this.traitsToItems[trait] || <IItemMap> {};
+		var items: IItemMap = this.traitsToItems[trait] || <IItemMap>{};
 		var item: Item;
 		var id: string;
 
@@ -1292,7 +1357,7 @@ export class TreeModel extends Events.EventEmitter {
 			var items: { [id: string]: Item; } = {};
 			var item: Item;
 
-			for (var i = 0, len = elements.length; i < len; i++) {
+			for (let i = 0, len = elements.length; i < len; i++) {
 				item = this.getItem(elements[i]);
 
 				if (item) {
@@ -1300,7 +1365,7 @@ export class TreeModel extends Events.EventEmitter {
 				}
 			}
 
-			var traitItems: IItemMap = this.traitsToItems[trait] || <IItemMap> {};
+			var traitItems: IItemMap = this.traitsToItems[trait] || <IItemMap>{};
 			var itemsToRemoveTrait: Item[] = [];
 			var id: string;
 
@@ -1314,7 +1379,7 @@ export class TreeModel extends Events.EventEmitter {
 				}
 			}
 
-			for (var i = 0, len = itemsToRemoveTrait.length; i < len; i++) {
+			for (let i = 0, len = itemsToRemoveTrait.length; i < len; i++) {
 				item = itemsToRemoveTrait[i];
 				item.removeTrait(trait);
 				delete traitItems[item.id];

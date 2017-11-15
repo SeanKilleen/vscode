@@ -5,28 +5,23 @@
 'use strict';
 
 import nls = require('vs/nls');
-import {PluginsRegistry} from 'vs/platform/plugins/common/pluginsRegistry';
-import {Registry} from 'vs/platform/platform';
+import { ExtensionsRegistry } from 'vs/platform/extensions/common/extensionsRegistry';
 import URI from 'vs/base/common/uri';
-import JSONContributionRegistry = require('vs/platform/jsonschemas/common/jsonContributionRegistry');
 import strings = require('vs/base/common/strings');
 import paths = require('vs/base/common/paths');
-import {INullService} from 'vs/platform/instantiation/common/instantiation';
 
 interface IJSONValidationExtensionPoint {
 	fileMatch: string;
 	url: string;
 }
 
-let schemaRegistry = <JSONContributionRegistry.IJSONContributionRegistry>Registry.as(JSONContributionRegistry.Extensions.JSONContribution);
-
-let configurationExtPoint = PluginsRegistry.registerExtensionPoint<IJSONValidationExtensionPoint[]>('jsonValidation', {
+let configurationExtPoint = ExtensionsRegistry.registerExtensionPoint<IJSONValidationExtensionPoint[]>('jsonValidation', [], {
 	description: nls.localize('contributes.jsonValidation', 'Contributes json schema configuration.'),
 	type: 'array',
-	default: [{ fileMatch: '{{file.json}}', url: '{{url}}' }],
+	defaultSnippets: [{ body: [{ fileMatch: '${1:file.json}', url: '${2:url}' }] }],
 	items: {
 		type: 'object',
-		default: { fileMatch: '{{file.json}}', url: '{{url}}' },
+		defaultSnippets: [{ body: { fileMatch: '${1:file.json}', url: '${2:url}' } }],
 		properties: {
 			fileMatch: {
 				type: 'string',
@@ -42,14 +37,12 @@ let configurationExtPoint = PluginsRegistry.registerExtensionPoint<IJSONValidati
 
 export class JSONValidationExtensionPoint {
 
-	constructor(
-		@INullService modeService: INullService
-	) {
+	constructor() {
 		configurationExtPoint.setHandler((extensions) => {
-			for (var i = 0; i < extensions.length; i++) {
-				var extensionValue = <IJSONValidationExtensionPoint[]>extensions[i].value;
-				var collector = extensions[i].collector;
-				var extensionPath = extensions[i].description.extensionFolderPath;
+			for (let i = 0; i < extensions.length; i++) {
+				const extensionValue = <IJSONValidationExtensionPoint[]>extensions[i].value;
+				const collector = extensions[i].collector;
+				const extensionPath = extensions[i].description.extensionFolderPath;
 
 				if (!extensionValue || !Array.isArray(extensionValue)) {
 					collector.error(nls.localize('invalid.jsonValidation', "'configuration.jsonValidation' must be a array"));
@@ -75,11 +68,6 @@ export class JSONValidationExtensionPoint {
 						collector.error(nls.localize('invalid.url.schema', "'configuration.jsonValidation.url' must start with 'http:', 'https:' or './' to reference schemas located in the extension"));
 						return;
 					}
-					let fileMatch = extension.fileMatch;
-					if (!strings.startsWith(extension.fileMatch, '/')) {
-						fileMatch = '/' + fileMatch;
-					}
-					schemaRegistry.addSchemaFileAssociation(fileMatch, uri);
 				});
 			}
 		});

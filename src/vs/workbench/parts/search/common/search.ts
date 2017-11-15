@@ -5,35 +5,27 @@
 
 'use strict';
 
-import {TPromise} from 'vs/base/common/winjs.base';
-import {onUnexpectedError, illegalArgument} from 'vs/base/common/errors';
-import {IDisposable} from 'vs/base/common/lifecycle';
-import {CommonEditorRegistry} from 'vs/editor/common/editorCommonExtensions';
-import {IRange} from 'vs/editor/common/editorCommon';
+import { TPromise } from 'vs/base/common/winjs.base';
+import { onUnexpectedError } from 'vs/base/common/errors';
+import { IDisposable } from 'vs/base/common/lifecycle';
+import { ISearchConfiguration } from 'vs/platform/search/common/search';
+import glob = require('vs/base/common/glob');
+import { SymbolInformation } from 'vs/editor/common/modes';
+import { IEditorGroupService } from 'vs/workbench/services/group/common/groupService';
+import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
 import URI from 'vs/base/common/uri';
+import { toResource } from 'vs/workbench/common/editor';
 
-/**
- * Interface used to navigate to types by value.
- */
-export interface ITypeBearing {
-	containerName: string;
-	name: string;
-	parameters: string;
-	type: string;
-	range: IRange;
-	resourceUri: URI;
+export interface IWorkspaceSymbolProvider {
+	provideWorkspaceSymbols(search: string): TPromise<SymbolInformation[]>;
+	resolveWorkspaceSymbol?: (item: SymbolInformation) => TPromise<SymbolInformation>;
 }
 
-export interface INavigateTypesSupport {
-	getNavigateToItems:(search: string)=>TPromise<ITypeBearing[]>;
-}
+export namespace WorkspaceSymbolProviderRegistry {
 
+	const _supports: IWorkspaceSymbolProvider[] = [];
 
-export namespace NavigateTypesSupportRegistry {
-
-	const _supports: INavigateTypesSupport[] = [];
-
-	export function register(support:INavigateTypesSupport):IDisposable {
+	export function register(support: IWorkspaceSymbolProvider): IDisposable {
 
 		if (support) {
 			_supports.push(support);
@@ -52,32 +44,56 @@ export namespace NavigateTypesSupportRegistry {
 		};
 	}
 
-	export function all(): INavigateTypesSupport[] {
+	export function all(): IWorkspaceSymbolProvider[] {
 		return _supports.slice(0);
 	}
 }
 
-export function getNavigateToItems(query: string): TPromise<ITypeBearing[]> {
+export function getWorkspaceSymbols(query: string): TPromise<[IWorkspaceSymbolProvider, SymbolInformation[]][]> {
 
-	const promises = NavigateTypesSupportRegistry.all().map(support => {
-		return support.getNavigateToItems(query).then(value => value, onUnexpectedError);
-	});
+	const result: [IWorkspaceSymbolProvider, SymbolInformation[]][] = [];
 
-	return TPromise.join(promises).then(all => {
-		const result: ITypeBearing[] = [];
-		for (let bearings of all) {
-			if (Array.isArray(bearings)) {
-				result.push(...bearings);
+	const promises = WorkspaceSymbolProviderRegistry.all().map(support => {
+		return support.provideWorkspaceSymbols(query).then(value => {
+			if (Array.isArray(value)) {
+				result.push([support, value]);
 			}
-		}
-		return result;
+		}, onUnexpectedError);
 	});
+
+	return TPromise.join(promises).then(_ => result);
 }
 
-CommonEditorRegistry.registerLanguageCommand('_executeWorkspaceSymbolProvider', function(accessor, args: { query: string;}) {
-	let {query} = args;
-	if (typeof query !== 'string') {
-		throw illegalArgument();
-	}
-	return getNavigateToItems(query);
-});
+export interface IWorkbenchSearchConfiguration extends ISearchConfiguration {
+	search: {
+		quickOpen: {
+			includeSymbols: boolean;
+		},
+		exclude: glob.IExpression,
+		useRipgrep: boolean,
+		/**
+		 * Use ignore file for file search.
+		 */
+		useIgnoreFiles: boolean,
+		followSymlinks: boolean;
+	};
+}
+
+/**
+ * Helper to return all opened editors with resources not belonging to the currently opened workspace.
+ */
+export function getOutOfWorkspaceEditorResources(editorGroupService: IEditorGroupService, contextService: IWorkspaceContextService): URI[] {
+	const resources: URI[] = [];
+
+	editorGroupService.getStacksModel().groups.forEach(group => {
+		const editors = group.getEditors();
+		editors.forEach(editor => {
+			const resource = toResource(editor, { supportSideBySide: true });
+			if (resource && !contextService.isInsideWorkspace(resource)) {
+				resources.push(resource);
+			}
+		});
+	});
+
+	return resources;
+}

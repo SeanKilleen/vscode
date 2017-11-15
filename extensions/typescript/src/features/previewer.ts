@@ -3,45 +3,46 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-'use strict';
-
 import * as Proto from '../protocol';
-
-export interface IHTMLContentElement {
-	formattedText?: string;
-	text?: string;
-	className?: string;
-	style?: string;
-	customStyle?: any;
-	tagName?: string;
-	children?: IHTMLContentElement[];
-	isText?: boolean;
-}
-
-export function html(parts: Proto.SymbolDisplayPart[], className: string = ''): IHTMLContentElement {
-
-	if (!parts) {
-		return {};
-	}
-
-	let htmlParts = parts.map(part => {
-		return <IHTMLContentElement>{
-			tagName: 'span',
-			text: part.text,
-			className: part.kind
-		};
-	});
-
-	return {
-		tagName: 'div',
-		className: 'ts-symbol ' + className,
-		children: htmlParts
-	};
-}
+import { MarkdownString } from 'vscode';
 
 export function plain(parts: Proto.SymbolDisplayPart[]): string {
 	if (!parts) {
 		return '';
 	}
 	return parts.map(part => part.text).join('');
+}
+
+export function tagsMarkdownPreview(tags: Proto.JSDocTagInfo[]): string {
+	return (tags || [])
+		.map(tag => {
+			const label = `*@${tag.name}*`;
+			if (!tag.text) {
+				return label;
+			}
+			return label + (tag.text.match(/\r\n|\n/g) ? '  \n' + tag.text : ` — ${tag.text}`);
+		})
+		.join('  \n\n');
+}
+
+export function markdownDocumentation(
+	documentation: Proto.SymbolDisplayPart[],
+	tags: Proto.JSDocTagInfo[]
+): MarkdownString {
+	const out = new MarkdownString();
+	addmarkdownDocumentation(out, documentation, tags);
+	return out;
+}
+
+export function addmarkdownDocumentation(
+	out: MarkdownString,
+	documentation: Proto.SymbolDisplayPart[],
+	tags: Proto.JSDocTagInfo[]
+): MarkdownString {
+	out.appendMarkdown(plain(documentation));
+	const tagsPreview = tagsMarkdownPreview(tags);
+	if (tagsPreview) {
+		out.appendMarkdown('\n\n' + tagsPreview);
+	}
+	return out;
 }

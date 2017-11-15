@@ -5,54 +5,49 @@
 'use strict';
 
 import URI from 'vs/base/common/uri';
-import {TPromise} from 'vs/base/common/winjs.base';
-import {EventType, IModel} from 'vs/editor/common/editorCommon';
-import {EditableTextModel} from 'vs/editor/common/model/editableTextModel';
-import {TextModel} from 'vs/editor/common/model/textModel';
-import {IMode} from 'vs/editor/common/modes';
+import {
+	IModel, ITextModelCreationOptions
+} from 'vs/editor/common/editorCommon';
+import { EditableTextModel } from 'vs/editor/common/model/editableTextModel';
+import { TextModel } from 'vs/editor/common/model/textModel';
+import { IDisposable } from 'vs/base/common/lifecycle';
+import { LanguageIdentifier } from 'vs/editor/common/modes';
+import { IRawTextSource, RawTextSource } from 'vs/editor/common/model/textSource';
+import * as textModelEvents from 'vs/editor/common/model/textModelEvents';
 
 // The hierarchy is:
-// Model -> EditableTextModel -> TextModelWithDecorations -> TextModelWithTrackedRanges -> TextModelWithMarkers -> TextModelWithTokens -> TextModel
+// Model -> EditableTextModel -> TextModelWithDecorations -> TextModelWithTokens -> TextModel
 
 var MODEL_ID = 0;
 
-var aliveModels:{[modelId:string]:boolean;} = {};
-
-// var LAST_CNT = 0;
-// setInterval(() => {
-// 	var cnt = Object.keys(aliveModels).length;
-// 	if (cnt === LAST_CNT) {
-// 		return;
-// 	}
-// 	console.warn('ALIVE MODELS:');
-// 	console.log(Object.keys(aliveModels).join('\n'));
-// 	LAST_CNT = cnt;
-// }, 100);
-
 export class Model extends EditableTextModel implements IModel {
 
-	public id:string;
+	public onDidChangeDecorations(listener: (e: textModelEvents.IModelDecorationsChangedEvent) => void): IDisposable {
+		return this._eventEmitter.addListener(textModelEvents.TextModelEventType.ModelDecorationsChanged, listener);
+	}
+	public onDidChangeOptions(listener: (e: textModelEvents.IModelOptionsChangedEvent) => void): IDisposable {
+		return this._eventEmitter.addListener(textModelEvents.TextModelEventType.ModelOptionsChanged, listener);
+	}
+	public onWillDispose(listener: () => void): IDisposable {
+		return this._eventEmitter.addListener(textModelEvents.TextModelEventType.ModelDispose, listener);
+	}
+	public onDidChangeLanguage(listener: (e: textModelEvents.IModelLanguageChangedEvent) => void): IDisposable {
+		return this._eventEmitter.addListener(textModelEvents.TextModelEventType.ModelLanguageChanged, listener);
+	}
+	public onDidChangeLanguageConfiguration(listener: (e: textModelEvents.IModelLanguageConfigurationChangedEvent) => void): IDisposable {
+		return this._eventEmitter.addListener(textModelEvents.TextModelEventType.ModelLanguageConfigurationChanged, listener);
+	}
+	public static createFromString(text: string, options: ITextModelCreationOptions = TextModel.DEFAULT_CREATION_OPTIONS, languageIdentifier: LanguageIdentifier = null, uri: URI = null): Model {
+		return new Model(RawTextSource.fromString(text), options, languageIdentifier, uri);
+	}
 
-	private _associatedResource:URI;
-	private _attachedEditorCount:number;
+	public readonly id: string;
 
-	/**
-	 * Instantiates a new model
-	 * @param rawText
-	 *   The raw text buffer. It may start with a UTF-16 BOM, which can be
-	 *   optionally preserved when doing a getValue call. The lines may be
-	 *   separated by different EOL combinations, such as \n or \r\n. These
-	 *   can also be preserved when doing a getValue call.
-	 * @param mode
-	 *   The language service name this model is bound to.
-	 * @param associatedResource
-	 *   The resource associated with this model. If the value is not provided an
-	 *   unique in memory URL is constructed as the associated resource.
-	 */
-	constructor(rawText:string, modeOrPromise:IMode|TPromise<IMode>, associatedResource:URI=null) {
-		super([
-			EventType.ModelDispose
-		], TextModel.toRawText(rawText), modeOrPromise);
+	private readonly _associatedResource: URI;
+	private _attachedEditorCount: number;
+
+	constructor(rawTextSource: IRawTextSource, creationOptions: ITextModelCreationOptions, languageIdentifier: LanguageIdentifier, associatedResource: URI = null) {
+		super(rawTextSource, creationOptions, languageIdentifier);
 
 		// Generate a new unique model id
 		MODEL_ID++;
@@ -64,19 +59,7 @@ export class Model extends EditableTextModel implements IModel {
 			this._associatedResource = associatedResource;
 		}
 
-
-		if (aliveModels[String(this._associatedResource)]) {
-			throw new Error('Cannot instantiate a second Model with the same URI!');
-		}
-
 		this._attachedEditorCount = 0;
-
-		aliveModels[String(this._associatedResource)] = true;
-		// console.log('ALIVE MODELS: ' + Object.keys(aliveModels).join('\n'));
-	}
-
-	public getModeId(): string {
-		return this.getMode().getId();
 	}
 
 	public destroy(): void {
@@ -85,43 +68,30 @@ export class Model extends EditableTextModel implements IModel {
 
 	public dispose(): void {
 		this._isDisposing = true;
-		delete aliveModels[String(this._associatedResource)];
-		this.emit(EventType.ModelDispose);
+		this._eventEmitter.emit(textModelEvents.TextModelEventType.ModelDispose);
 		super.dispose();
 		this._isDisposing = false;
-		// console.log('ALIVE MODELS: ' + Object.keys(aliveModels).join('\n'));
 	}
 
 	public onBeforeAttached(): void {
-		if (this._isDisposed) {
-			throw new Error('Model.onBeforeAttached: Model is disposed');
-		}
-
 		this._attachedEditorCount++;
-
 		// Warm up tokens for the editor
 		this._warmUpTokens();
 	}
 
 	public onBeforeDetached(): void {
-		if (this._isDisposed) {
-			throw new Error('Model.onBeforeDetached: Model is disposed');
-		}
-
 		this._attachedEditorCount--;
+	}
 
-		// Intentional empty (for now)
+	protected _shouldAutoTokenize(): boolean {
+		return this.isAttachedToEditor();
 	}
 
 	public isAttachedToEditor(): boolean {
 		return this._attachedEditorCount > 0;
 	}
 
-	public getAssociatedResource(): URI {
-		if (this._isDisposed) {
-			throw new Error('Model.getAssociatedResource: Model is disposed');
-		}
-
+	public get uri(): URI {
 		return this._associatedResource;
 	}
 }

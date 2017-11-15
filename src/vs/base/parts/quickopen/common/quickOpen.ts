@@ -4,10 +4,15 @@
  *--------------------------------------------------------------------------------------------*/
 'use strict';
 
-import {Keybinding} from 'vs/base/common/keyCodes';
+import { ResolvedKeybinding } from 'vs/base/common/keyCodes';
 
+/* __GDPR__FRAGMENT__
+	"IQuickNavigateConfiguration" : {
+		"keybindings" : { "classification": "SystemMetaData", "purpose": "FeatureInsight" }
+	}
+*/
 export interface IQuickNavigateConfiguration {
-	keybindings: Keybinding[];
+	keybindings: ResolvedKeybinding[];
 }
 
 export interface IAutoFocus {
@@ -28,6 +33,11 @@ export interface IAutoFocus {
 	autoFocusSecondEntry?: boolean;
 
 	/**
+	 * If set to true, will automatically select the last entry from the result list.
+	 */
+	autoFocusLastEntry?: boolean;
+
+	/**
 	 * If set to true, will automatically select any entry whose label starts with the search
 	 * value. Since some entries to the top might match the query but not on the prefix, this
 	 * allows to select the most accurate match (matching the prefix) while still showing other
@@ -38,11 +48,13 @@ export interface IAutoFocus {
 
 export enum Mode {
 	PREVIEW,
-	OPEN
+	OPEN,
+	OPEN_IN_BACKGROUND
 }
 
-export interface IContext {
+export interface IEntryRunContext {
 	event: any;
+	keymods: number[];
 	quickNavigateConfiguration: IQuickNavigateConfiguration;
 }
 
@@ -57,8 +69,8 @@ export interface IDataSource<T> {
 export interface IRenderer<T> {
 	getHeight(entry: T): number;
 	getTemplateId(entry: T): string;
-	renderTemplate(templateId: string, container: HTMLElement): any;
-	renderElement(entry: T, templateId: string, templateData: any): void;
+	renderTemplate(templateId: string, container: HTMLElement, styles: any): any;
+	renderElement(entry: T, templateId: string, templateData: any, styles: any): void;
 	disposeTemplate(templateId: string, templateData: any): void;
 }
 
@@ -71,7 +83,7 @@ export interface IAccessiblityProvider<T> {
 }
 
 export interface IRunner<T> {
-	run(entry: T, mode: Mode, context: IContext): boolean;
+	run(entry: T, mode: Mode, context: IEntryRunContext): boolean;
 }
 
 export interface IModel<T> {
